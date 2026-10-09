@@ -5502,7 +5502,7 @@ dependencies = [
 
 [[package]]
 name = "terrain"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5528,7 +5528,7 @@ dependencies = [
 
 [[package]]
 name = "terrain-agent"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "adk-acp",
  "adk-agent",
@@ -5557,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "terrain-cli"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -5572,7 +5572,7 @@ dependencies = [
 
 [[package]]
 name = "terrain-core"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5594,7 +5594,7 @@ dependencies = [
 
 [[package]]
 name = "terrain-ts-export"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "terrain-agent",
  "terrain-core",
