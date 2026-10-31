@@ -12,10 +12,12 @@ import type {
   BatchUpdateResult,
   DashboardSummary,
   FreshnessSummary,
+  GeneratedCommitMessage,
   GitBranches,
   GitCommit,
   GitDiff,
   GitFileEntry,
+  GitMergePreview,
   GitOpResult,
   GitStatus,
   GraphifyCommunity,
@@ -353,6 +355,9 @@ export const gitCommit = (repoPath: string, message: string) =>
 export const gitMerge = (repoPath: string, branch: string) =>
   invoke<GitOpResult>("git_merge_cmd", { repoPath, branch });
 
+export const getGitMergePreview = (repoPath: string, branch: string) =>
+  invoke<GitMergePreview>("git_merge_preview_cmd", { repoPath, branch });
+
 export const gitPush = (repoPath: string) =>
   invoke<GitOpResult>("git_push_cmd", { repoPath });
 
@@ -389,3 +394,21 @@ export const gitFetch = (repoPath: string) =>
 
 export const gitCheckout = (repoPath: string, branch: string) =>
   invoke<GitOpResult>("git_checkout_cmd", { repoPath, branch });
+
+export const gitGenerateCommitMessage = (repoPath: string, files: string[]) =>
+  invoke<GeneratedCommitMessage>("git_generate_commit_message_cmd", { repoPath, files });
+
+export const gitDiscardFile = (repoPath: string, path: string) =>
+  invoke<GitOpResult>("git_discard_file_cmd", { repoPath, path });
+
+export const gitUndoLastCommit = (repoPath: string) =>
+  invoke<GitOpResult>("git_undo_last_commit_cmd", { repoPath });
+
+export const gitStashPush = (repoPath: string) =>
+  invoke<GitOpResult>("git_stash_push_cmd", { repoPath });
+
+export const gitStashPop = (repoPath: string) =>
+  invoke<GitOpResult>("git_stash_pop_cmd", { repoPath });
+
+export const gitCreateBranch = (repoPath: string, name: string) =>
+  invoke<GitOpResult>("git_create_branch_cmd", { repoPath, name });

@@ -243,6 +243,70 @@ pub fn merge(repo: &Path, branch: &str) -> Result<GitOpResult> {
     Ok(GitOpResult { ok, output: text })
 }
 
+/// What a merge would bring in: the commits `HEAD..<branch>` and the combined
+/// shortstat of `HEAD...<branch>` (files changed / insertions / deletions).
+#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-export", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct GitMergePreview {
+    /// The branch being merged in.
+    pub branch: String,
+    /// Incoming commits (newest first; `body` is empty here).
+    pub commits: Vec<GitCommit>,
+    /// `git diff --shortstat HEAD...<branch>` text; empty when up to date.
+    pub shortstat: String,
+}
+
+/// Preview of the commits a merge would apply, mirroring desktop/desktop's
+/// merge-branch-dialog (commit list + change-size summary) before confirming.
+pub fn merge_preview(repo: &Path, branch: &str) -> Result<GitMergePreview> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(CoreError::InvalidDoc("empty branch name".to_owned()));
+    }
+    let range = format!("HEAD..{branch}");
+    let (ok, text) = run_git(
+        repo,
+        &[
+            "log",
+            "-n",
+            "100",
+            &range,
+            "--pretty=format:\u{1e}%H\u{1f}%h\u{1f}%an\u{1f}%ct\u{1f}%s\u{1f}",
+        ],
+    )?;
+    if !ok {
+        return Err(CoreError::InvalidDoc(format!(
+            "git merge preview failed: {text}"
+        )));
+    }
+    let commits = text
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+        .filter_map(|record| {
+            let record = record.trim_end_matches('\n');
+            let mut parts = record.splitn(6, '\u{1f}');
+            Some(GitCommit {
+                hash: parts.next()?.to_owned(),
+                short: parts.next()?.to_owned(),
+                author: parts.next()?.to_owned(),
+                time_secs: parts.next()?.trim().parse().unwrap_or(0),
+                summary: parts.next().unwrap_or("").to_owned(),
+                body: String::new(),
+            })
+        })
+        .collect();
+    let (_ok2, shortstat) = run_git(
+        repo,
+        &["diff", "--shortstat", &format!("HEAD...{branch}")],
+    )?;
+    Ok(GitMergePreview {
+        branch: branch.to_owned(),
+        commits,
+        shortstat: shortstat.trim().to_owned(),
+    })
+}
+
 /// Push current branch (sets upstream on first push).
 pub fn push(repo: &Path) -> Result<GitOpResult> {
     let st = status(repo)?;
@@ -348,7 +412,7 @@ mod tests {
             .current_dir(&repo)
             .output();
         let _ = crate::process::command("git")
-            .args(["commit", "-m", "feature work"])
+            .args(["commit", "-m", "feature work", "-m", "adds c.txt"])
             .current_dir(&repo)
             .output();
         let _ = crate::process::command("git")
@@ -363,6 +427,59 @@ mod tests {
         let res = merge(&repo, "feature").unwrap();
         assert!(res.ok, "merge output: {}", res.output);
         assert!(repo.join("c.txt").exists());
+    }
+
+    #[test]
+    fn merge_preview_lists_incoming() {
+        let repo = temp_repo("preview");
+        let _ = crate::process::command("git")
+            .args(["checkout", "-q", "-b", "feature"])
+            .current_dir(&repo)
+            .output();
+        std::fs::write(repo.join("c.txt"), "f\n").unwrap();
+        let _ = crate::process::command("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output();
+        let _ = crate::process::command("git")
+            .args(["commit", "-q", "-m", "feature work", "-m", "adds c.txt"])
+            .current_dir(&repo)
+            .output();
+        let _ = crate::process::command("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output();
+
+        let preview = merge_preview(&repo, "feature").unwrap();
+        assert_eq!(preview.commits.len(), 1, "{:?}", preview.commits);
+        assert!(preview.commits[0].summary.contains("feature work"));
+        assert!(preview.shortstat.contains("1 file changed"), "stat: {}", preview.shortstat);
+
+        // Up to date: nothing incoming, empty stat.
+        merge(&repo, "feature").unwrap();
+        let none = merge_preview(&repo, "feature").unwrap();
+        assert!(none.commits.is_empty());
+        assert!(none.shortstat.is_empty(), "stat: {}", none.shortstat);
+    }
+
+    #[test]
+    fn history_keeps_multiline_body() {
+        let repo = temp_repo("body");
+        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        let _ = crate::process::command("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output();
+        let _ = crate::process::command("git")
+            .args(["commit", "-q", "-m", "subject line", "-m", "body para one", "-m", "body para two"])
+            .current_dir(&repo)
+            .output();
+
+        let log = history(&repo, 5).unwrap();
+        let top = log.first().unwrap();
+        assert_eq!(top.summary, "subject line");
+        assert!(top.body.contains("body para one"), "body: {:?}", top.body);
+        assert!(top.body.contains("body para two"), "body: {:?}", top.body);
     }
 }
 
@@ -380,6 +497,8 @@ pub struct GitCommit {
     pub author: String,
     pub time_secs: u64,
     pub summary: String,
+    /// Full commit-message body (everything after the subject), trimmed.
+    pub body: String,
 }
 
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
@@ -394,8 +513,14 @@ const MAX_DIFF_BYTES: usize = 512 * 1024;
 
 /// Unified patch for one file: `staged` chooses index-vs-HEAD over worktree.
 pub fn diff_file(repo: &Path, path: &str, staged: bool) -> Result<GitDiff> {
+    let is_untracked = {
+        let (ok, listing) = run_git(repo, &["ls-files", "--", path])?;
+        ok && listing.trim().is_empty()
+    };
     let mut args: Vec<&str> = if staged {
         vec!["diff", "--no-color", "--cached", "--"]
+    } else if is_untracked {
+        vec!["diff", "--no-color", EMPTY_TREE, "--"]
     } else {
         vec!["diff", "--no-color", "--"]
     };
@@ -428,22 +553,27 @@ pub fn history(repo: &Path, limit: usize) -> Result<Vec<GitCommit>> {
             "log",
             "-n",
             &lim,
-            "--pretty=format:%H\u{1f}%h\u{1f}%an\u{1f}%ct\u{1f}%s",
+            // The record separator (\u{1e}) keeps multi-line bodies (%b)
+            // inside one record; fields are split on \u{1f}.
+            "--pretty=format:\u{1e}%H\u{1f}%h\u{1f}%an\u{1f}%ct\u{1f}%s\u{1f}%b",
         ],
     )?;
     if !ok {
         return Err(CoreError::InvalidDoc(format!("git log failed: {text}")));
     }
     let commits = text
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\u{1f}');
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+        .filter_map(|record| {
+            let record = record.trim_end_matches('\n');
+            let mut parts = record.splitn(6, '\u{1f}');
             Some(GitCommit {
                 hash: parts.next()?.to_owned(),
                 short: parts.next()?.to_owned(),
                 author: parts.next()?.to_owned(),
                 time_secs: parts.next()?.trim().parse().unwrap_or(0),
                 summary: parts.next().unwrap_or("").to_owned(),
+                body: parts.next().unwrap_or("").trim().to_owned(),
             })
         })
         .collect();
@@ -600,5 +730,152 @@ mod desktop_mirror_tests {
         let diff = diff_file(&repo, "a.txt", false).unwrap();
         assert!(diff.text.contains("+again"), "diff: {}", diff.text);
         assert!(!diff.text.contains("+changed"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v3 operations: stash, discard, undo-commit, create-branch; untracked diffs
+// via the constant empty-tree hash (platform-independent).
+
+/// Git's well-known empty tree object id — same in every repository.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Stash all changes (tracked + untracked) with a marker message.
+pub fn stash_push(repo: &Path) -> Result<GitOpResult> {
+    op(
+        repo,
+        &[
+            "stash",
+            "push",
+            "--include-untracked",
+            "--quiet",
+            "-m",
+            "terrain stash",
+        ],
+        "git stash",
+    )
+}
+
+/// Pop the most recent stash back onto the working tree.
+pub fn stash_pop(repo: &Path) -> Result<GitOpResult> {
+    op(repo, &["stash", "pop", "--quiet"], "git stash pop")
+}
+
+/// How many stashes exist (0 = none).
+pub fn stash_count(repo: &Path) -> usize {
+    let (_ok, text) = run_git(repo, &["stash", "list", "--quiet"]).unwrap_or((true, String::new()));
+    text.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// Discard one file's working-tree changes. Tracked files are restored from
+/// HEAD; untracked files are deleted (they live nowhere else).
+pub fn discard_file(repo: &Path, path: &str) -> Result<GitOpResult> {
+    let path = path.trim().to_owned();
+    if path.is_empty() {
+        return Err(CoreError::InvalidDoc("empty path".to_owned()));
+    }
+    // Untracked = not in the index/HEAD: deleting is the discard.
+    let (ok, _text) = run_git(repo, &["ls-files", "--", &path])?;
+    if !ok || _text.trim().is_empty() {
+        let target = repo.join(&path);
+        if target.is_file() {
+            std::fs::remove_file(&target)?;
+            return Ok(GitOpResult {
+                ok: true,
+                output: format!("removed untracked {path}"),
+            });
+        }
+        return Err(CoreError::InvalidDoc(format!(
+            "file not tracked and not present: {path}"
+        )));
+    }
+    op(repo, &["restore", "--", &path], "git restore")
+}
+
+/// Undo the last commit, keeping its changes in the working tree.
+pub fn undo_last_commit(repo: &Path) -> Result<GitOpResult> {
+    op(
+        repo,
+        &["reset", "--mixed", "--quiet", "HEAD~1"],
+        "git reset HEAD~1",
+    )
+}
+
+/// Create a new branch from the current HEAD and switch to it.
+pub fn create_branch(repo: &Path, name: &str) -> Result<GitOpResult> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CoreError::InvalidDoc("empty branch name".to_owned()));
+    }
+    op(
+        repo,
+        &["checkout", "-b", name, "--quiet"],
+        "git checkout -b",
+    )
+}
+
+#[cfg(test)]
+mod v3_tests {
+    use super::*;
+
+    fn temp_repo(name: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!("gitops-v3-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            ["init", "-q", "."],
+            ["config", "user.email", "t@t"],
+            ["config", "user.name", "t"],
+            ["config", "commit.gpgsign", "false"],
+        ] {
+            let _ = crate::process::command("git").args(args).current_dir(&repo).output();
+        }
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        let _ = crate::process::command("git").args(["add", "."]).current_dir(&repo).output();
+        let _ = crate::process::command("git").args(["commit", "-m", "init"]).current_dir(&repo).output();
+        std::fs::write(repo.join("b.txt"), "second\n").unwrap();
+        let _ = crate::process::command("git").args(["add", "."]).current_dir(&repo).output();
+        let _ = crate::process::command("git").args(["commit", "-m", "second"]).current_dir(&repo).output();
+        repo
+    }
+
+    #[test]
+    fn stash_and_undo_roundtrip() {
+        let repo = temp_repo("stash");
+        std::fs::write(repo.join("a.txt"), "dirty\n").unwrap();
+        stash_push(&repo).unwrap();
+        assert_eq!(stash_count(&repo), 1);
+        let st = status(&repo).unwrap();
+        assert!(st.entries.is_empty(), "worktree clean after stash");
+        stash_pop(&repo).unwrap();
+        assert_eq!(stash_count(&repo), 0);
+        let st = status(&repo).unwrap();
+        assert!(st.entries.iter().any(|e| e.unstaged == Some("M".to_owned())));
+
+        undo_last_commit(&repo).unwrap();
+        let st = status(&repo).unwrap();
+        // reset --mixed: the undone commit's file returns as untracked
+        assert!(st.entries.iter().any(|e| e.path == "b.txt" && e.untracked));
+    }
+
+    #[test]
+    fn discard_and_branch_and_untracked_diff() {
+        let repo = temp_repo("discard");
+        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("untracked.txt"), "new\n").unwrap();
+
+        discard_file(&repo, "a.txt").unwrap();
+        let st = status(&repo).unwrap();
+        assert!(!st.entries.iter().any(|e| e.path == "a.txt"));
+
+        discard_file(&repo, "untracked.txt").unwrap();
+        assert!(!repo.join("untracked.txt").exists());
+
+        let diff = diff_file(&repo, "a.txt", false).unwrap();
+        assert!(diff.text.is_empty());
+
+        create_branch(&repo, "terrain-v3-test").unwrap();
+        let st = status(&repo).unwrap();
+        assert_eq!(st.branch, "terrain-v3-test");
     }
 }
