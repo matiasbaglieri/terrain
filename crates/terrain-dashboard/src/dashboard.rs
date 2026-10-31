@@ -78,6 +78,8 @@ pub struct DocsCoverage {
     pub repomix: bool,
     pub graph: bool,
     pub wiki: bool,
+    /// Vault link configured (vault/graphify/<slug>/graphify-out).
+    pub vault: bool,
 }
 
 /// Inferred collaboration between two projects (shared git contributors).
@@ -104,8 +106,13 @@ pub struct DashboardRow {
     pub head_commit: Option<String>,
     /// "fresh" | "stale" | "unknown" — graph vs the repo's current git HEAD.
     pub staleness: String,
+    /// Today's agent spend for this repo from the local cost tracker (ccc).
+    pub cost_today_usd: Option<f64>,
     pub activity: ProjectActivity,
     pub docs: DocsCoverage,
+    /// Vault integration state for this project.
+    pub vault_configured: bool,
+    pub vault_path: Option<String>,
     pub last_batch: Option<LastBatchRecord>,
 }
 
@@ -119,6 +126,8 @@ pub struct DashboardTotals {
     pub stale: u64,
     pub total_nodes: u64,
     pub total_links: u64,
+    /// Fleet-wide spend today (sum of per-repo costs from the tracker).
+    pub total_cost_usd_today: f64,
 }
 
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
@@ -132,6 +141,8 @@ pub struct DashboardSummary {
     pub totals: DashboardTotals,
     /// Inferred cross-project collaborations (shared git contributors).
     pub collaborations: Vec<ProjectCollaboration>,
+    /// Whether any vault directory exists at the vault root (feature gate).
+    pub vault_root_exists: bool,
 }
 
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
@@ -167,6 +178,8 @@ pub struct ProjectUpdateResult {
     pub action: String,
     pub duration_secs: f64,
     pub error: Option<String>,
+    /// Vault link path when it was installed/refreshed by this run.
+    pub vault: Option<String>,
 }
 
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
@@ -351,6 +364,7 @@ pub fn scan_dashboard(
                         repomix: overview.agent_pack.is_some(),
                         graph: false,
                         wiki: false,
+                        vault: false,
                     };
                     (status, missing, overview.name, coverage)
                 }
@@ -410,6 +424,12 @@ pub fn scan_dashboard(
         }
 
         let head_commit = if repo.is_dir() { git_head(&repo) } else { None };
+        let cost_today_usd = if repo.is_dir() {
+            terrain_core::read_cost_today(&reg.slug)
+        } else {
+            None
+        };
+        totals.total_cost_usd_today += cost_today_usd.unwrap_or(0.0);
         let staleness = staleness_of(&graph.built_at_commit, &head_commit);
         let (activity, authors) = if repo.is_dir() {
             read_git_activity(&repo)
@@ -422,7 +442,14 @@ pub fn scan_dashboard(
         let docs = DocsCoverage {
             graph: graph.graph_present,
             wiki: graph.wiki_present,
+            vault: vault_link_current(&repo, &reg.slug).is_some(),
             ..docs
+        };
+        let vault_configured = docs.vault;
+        let vault_path = if vault_configured {
+            Some(vault_link_path(&reg.slug).display().to_string())
+        } else {
+            None
         };
 
         if graph.graph_present {
@@ -444,8 +471,11 @@ pub fn scan_dashboard(
             graph,
             head_commit,
             staleness,
+            cost_today_usd,
             activity,
             docs,
+            vault_configured,
+            vault_path,
             last_batch: history.get(&reg.slug).cloned(),
         });
     }
@@ -458,6 +488,7 @@ pub fn scan_dashboard(
     }
 
     Ok(DashboardSummary {
+        vault_root_exists: vault_root().is_dir(),
         generated_at_secs: now_secs(),
         binary_available,
         binary_path: graphify_bin
@@ -520,6 +551,7 @@ pub async fn batch_update_graphs(
                     action: "none".to_owned(),
                     duration_secs: 0.0,
                     error: Some("repo directory not found".to_owned()),
+                    vault: None,
                 };
             }
             let repo = PathBuf::from(&repo_path);
@@ -553,6 +585,11 @@ pub async fn batch_update_graphs(
                 })
             });
             let outcome = crate::graphify::run_graphify_action(&repo, &bin, action, on_line).await;
+            let vault = if outcome.ok {
+                sync_vault_link(&repo, &slug).unwrap_or(None)
+            } else {
+                None
+            };
             ProjectUpdateResult {
                 project_slug: slug,
                 ok: outcome.ok,
@@ -563,6 +600,7 @@ pub async fn batch_update_graphs(
                 } else {
                     Some(outcome.message)
                 },
+                vault,
             }
         }));
     }
@@ -575,6 +613,7 @@ pub async fn batch_update_graphs(
             action: "unknown".to_owned(),
             duration_secs: 0.0,
             error: Some(format!("task panicked: {e}")),
+            vault: None,
         }));
     }
 
@@ -785,5 +824,49 @@ mod activity_tests {
         // pure bucket math replication check via constants
         assert_eq!(ACTIVITY_WEEKS, 12);
         assert_eq!(604_800 * 12, 7_257_600);
+    }
+}
+
+// Vault integration moved to terrain_core::vault (needed by the env
+// integration too); re-exported here so the fleet API stays stable.
+pub use terrain_core::vault::{
+    session_autosave_registered, sync_vault_link, vault_link_current, vault_link_path, vault_root,
+};
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+
+    #[test]
+    fn vault_link_detect_and_sync() {
+        let repo = std::env::temp_dir().join(format!("vault-test-{}", std::process::id()));
+        let vault = std::env::temp_dir().join(format!("vault-test-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(repo.join(crate::graphify::GRAPHIFY_OUT_REL)).unwrap();
+        std::fs::create_dir_all(&vault).unwrap();
+        // SAFETY: single-threaded test process context; VAULT_DIR restore below.
+        unsafe { std::env::set_var("VAULT_DIR", &vault) };
+
+        // No graph content — nothing to sync
+        assert!(vault_link_current(&repo, "proj").is_none());
+
+        std::fs::write(
+            repo.join(crate::graphify::GRAPHIFY_OUT_REL)
+                .join("graph.json"),
+            "{}",
+        )
+        .unwrap();
+        let linked = sync_vault_link(&repo, "proj").unwrap();
+        assert!(linked.is_some());
+        assert!(vault_link_current(&repo, "proj").is_some());
+        // Refresh: a second sync is a no-op; links still valid
+        let again = sync_vault_link(&repo, "proj").unwrap();
+        assert_eq!(again, linked);
+
+        // SAFETY: restoring the test-modified environment.
+        unsafe { std::env::remove_var("VAULT_DIR") };
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

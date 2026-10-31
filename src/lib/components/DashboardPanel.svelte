@@ -55,6 +55,7 @@
       { key: "nodes", value: Number(totals.total_nodes) },
       { key: "links", value: Number(totals.total_links) },
       { key: "stale", value: Number(totals.stale) },
+      { key: "costToday", value: `$${Number(totals.total_cost_usd_today).toFixed(2)}` },
     ];
   });
 
@@ -171,6 +172,7 @@
     { key: "repomix", field: "repomix" },
     { key: "graph", field: "graph" },
     { key: "wiki", field: "wiki" },
+    { key: "vault", field: "vault" },
   ] as const;
 
   /** Per-project max weekly commits, for scaling each small-multiple sparkline. */
@@ -316,7 +318,7 @@
       </div>
     {/if}
 
-    <div class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+    <div class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       {#each metricCards as card (card.key)}
         <div class="rounded-xl border border-tr-border bg-tr-surface px-4 py-3">
           <p class="text-[11px] font-medium uppercase tracking-wide text-tr-ink-4">
@@ -366,6 +368,18 @@
       </button>
     </div>
 
+    {#if summary.vault_root_exists === false}
+      <div class="shrink-0 rounded-xl border border-tr-watch/30 bg-tr-watch-soft px-4 py-3" role="note">
+        <div class="flex items-start gap-3">
+          <TriangleAlert size={18} class="mt-0.5 shrink-0 text-tr-watch" aria-hidden="true" />
+          <div class="text-sm text-tr-on-watch">
+            <p>{tr("dashboard.vault.banner")}</p>
+            <p class="mt-1 text-xs opacity-80">{tr("dashboard.vault.bannerHint")}</p>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if batchRunning && batchLine}
       <div
         class="shrink-0 rounded-lg border border-tr-accent-soft bg-tr-accent-soft px-3 py-2"
@@ -384,6 +398,7 @@
             <th class="px-3 py-2 font-medium">{tr("dashboard.table.status")}</th>
             <th class="px-3 py-2 font-medium">{tr("dashboard.table.graph")}</th>
             <th class="px-3 py-2 font-medium">{tr("dashboard.table.staleness")}</th>
+            <th class="px-3 py-2 font-medium">{tr("dashboard.table.costToday")}</th>
             <th class="px-3 py-2 font-medium">{tr("dashboard.table.lastBatch")}</th>
             <th class="px-3 py-2 font-medium"><span class="sr-only">{tr("dashboard.actions.updateRow")}</span></th>
           </tr>
@@ -399,6 +414,15 @@
                 <span class={`inline-block rounded-full px-2.5 py-1 ${statusChipClass(row.status)}`}>
                   {statusLabel(row.status)}
                 </span>
+                {#if row.docs.vault === false && summary?.vault_root_exists && row.graph.graph_present}
+                  <span
+                    class="ml-1 inline-flex items-center gap-0.5 text-[11px] text-tr-ink-4"
+                    title={tr("dashboard.vault.rowHint")}
+                  >
+                    <TriangleAlert size={10} aria-hidden="true" />
+                    {tr("dashboard.docs.vault")}
+                  </span>
+                {/if}
                 {#if row.status === "partial" && row.missing_assets.length > 0}
                   <p class="mt-1 text-[11px] text-tr-on-watch">
                     {tr("dashboard.table.missingAssets.count", { count: row.missing_assets.length })}
@@ -416,6 +440,9 @@
                 <span class={`inline-block rounded-full px-2.5 py-1 ${stalenessChipClass(row)}`}>
                   {stalenessLabel(row)}
                 </span>
+              </td>
+              <td class="px-3 py-2 tabular-nums text-tr-ink-2">
+                {row.cost_today_usd !== null ? `$${Number(row.cost_today_usd).toFixed(2)}` : "—"}
               </td>
               <td class="px-3 py-2 text-tr-ink-3">{lastBatchCell(row)}</td>
               <td class="relative px-3 py-2 align-middle whitespace-nowrap">
@@ -565,7 +592,7 @@
                   ></div>
                 {/each}
               </div>
-              <span class="shrink-0 text-[11px] text-tr-ink-4">{docPresent(row)}/5</span>
+              <span class="shrink-0 text-[11px] text-tr-ink-4">{docPresent(row)}/6</span>
             </div>
           {/each}
         </div>

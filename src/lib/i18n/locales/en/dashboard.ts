@@ -9,6 +9,7 @@ export default {
     nodes: "Nodes",
     links: "Links",
     stale: "Stale graphs",
+    costToday: "Cost today",
   },
   binary: {
     missing: "Graphify CLI not found — batch updates are disabled.",
@@ -27,6 +28,7 @@ export default {
     status: "Terrain",
     graph: "Graph",
     staleness: "Graph state",
+    costToday: "Cost today",
     lastBatch: "Last batch",
     missingAssets: { count: "{count} missing" },
   },
@@ -84,7 +86,15 @@ export default {
     repomix: "Repomix",
     graph: "Graph",
     wiki: "Wiki",
+    vault: "Vault",
     present: "present",
     missing: "missing",
+  },
+  vault: {
+    banner:
+      "No Obsidian vault found at ~/vault — vault integration is off for graphify projects.",
+    bannerHint:
+      "Create ~/vault (or run the memory-setup installer) and re-run a project update to link the graph.",
+    rowHint: "Vault link not configured — run Update on this project.",
   },
 } as const;
